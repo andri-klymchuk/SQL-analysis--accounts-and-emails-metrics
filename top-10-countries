@@ -1,0 +1,100 @@
+WITH full_session AS ( -- This CTE outputs columns for subsequent joins and retrieves values ​​from different tables which will be used for final calculations
+  SELECT
+    sp.ga_session_id,
+    s.date,
+    sp.country,
+    acs.account_id,
+    a.send_interval,
+    a.is_verified,
+    a.is_unsubscribed
+  FROM `DA.session` s
+  JOIN `DA.session_params` sp
+  ON s.ga_session_id = sp.ga_session_id
+  JOIN `DA.account_session` acs
+  ON s.ga_session_id = acs.ga_session_id
+  JOIN `DA.account` a
+  ON acs.account_id = a.id ),
+
+
+  metrics AS ( -- This CTE combines metrics by account and by message via UNION
+  SELECT -- This select outputs the necessary data from the first CTE in the context of which the information will be provided. Also counts the accounts
+    date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    COUNT(DISTINCT account_id) AS account_cnt,
+    0 AS sent_msg,
+    0 AS open_msg,
+    0 AS visit_msg
+  FROM full_session
+  GROUP BY date, country, send_interval, is_verified, is_unsubscribed
+  UNION ALL -- Unification
+  SELECT -- This select outputs the necessary data from the first CTE in the context of which information will be provided, combines them through joins with the tables containing message data and counts the number of messages.
+    DATE_ADD(fs.date, INTERVAL es.sent_date DAY) AS date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    0 AS account_cnt,
+    COUNT(DISTINCT es.id_message) AS sent_msg,
+    COUNT(DISTINCT eo.id_message) AS open_msg,
+    COUNT(DISTINCT ev.id_message) AS visit_msg
+  FROM full_session fs
+  JOIN `DA.email_sent` es
+  ON es.id_account = fs.account_id
+  LEFT JOIN `DA.email_open` eo
+  ON es.id_message = eo.id_message
+  LEFT JOIN `DA.email_visit` ev
+  ON es.id_message = ev.id_message
+  GROUP BY DATE_ADD(fs.date, INTERVAL es.sent_date DAY), country, send_interval, is_verified, is_unsubscribed ),
+
+
+  total_metrics AS ( -- this CTE sums the data to get rid of columns with the value of 0 (created through UNION) and counts the total number of accounts and messages by country
+  SELECT
+    date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    SUM(account_cnt) AS account_cnt,
+    SUM(sent_msg) AS sent_msg,
+    SUM(open_msg) AS open_msg,
+    SUM(visit_msg) AS visit_msg,
+    SUM(SUM(account_cnt)) OVER(PARTITION BY country) AS total_country_account_cnt, -- The double use of SUM is explained by the use of the window function and the need to sum the values ​​formed by the union without using an additional STE
+    SUM(SUM(sent_msg)) OVER(PARTITION BY country) AS total_country_sent_cnt -- Same as in the previous comment
+  FROM metrics
+  GROUP BY date, country, send_interval, is_verified, is_unsubscribed )
+
+
+SELECT *
+FROM ( -- the subquery outputs all information from the previous STE and assigns a rank to countries by accounts and messages
+  SELECT
+    date,
+    country,
+    send_interval,
+    is_verified,
+    is_unsubscribed,
+    account_cnt,
+    sent_msg,
+    open_msg,
+    visit_msg,
+    total_country_account_cnt,
+    total_country_sent_cnt,
+    DENSE_RANK() OVER (ORDER BY total_country_account_cnt DESC) AS rank_total_country_account_cnt,
+    DENSE_RANK() OVER (ORDER BY total_country_sent_cnt DESC) AS rank_total_country_sent_cnt
+  FROM total_metrics)
+WHERE rank_total_country_account_cnt <=10 OR rank_total_country_sent_cnt <=10 -- Filters data to display only the top 10 countries
+ORDER BY date DESC, country, send_interval, is_verified, is_unsubscribed;
+
+
+
+
+
+
+
+
+
+
+
+
